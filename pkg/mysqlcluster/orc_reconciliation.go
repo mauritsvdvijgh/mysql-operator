@@ -43,7 +43,14 @@ func (f *cFactory) SyncOrchestratorStatus(ctx context.Context) error {
 	}
 
 	if insts, err := f.orcClient.Cluster(f.getClusterAlias()); err == nil {
+
+		err = f.updateNodesReadOnlyFlagInOrc(insts)
+		if err != nil {
+			glog.Infof("Error setting Master readOnly/writable %s", err)
+		}
+
 		f.updateStatusFromOrc(insts)
+
 	} else {
 		glog.Errorf("Fail to get cluster from orchestrator: %s. Now tries to register nodes.", err)
 		return f.registerNodesInOrc()
@@ -72,8 +79,135 @@ func (f *cFactory) SyncOrchestratorStatus(ctx context.Context) error {
 	return nil
 }
 
+func getInstance(hostname string, insts []orc.Instance) (*orc.Instance, error) {
+
+	for _, node := range insts {
+		host := node.Key.Hostname
+
+		if host == hostname {
+			return &node, nil
+		}
+	}
+
+	return nil, fmt.Errorf("the element was not found")
+}
+
+func getMaster(node *orc.Instance, insts []orc.Instance) (*orc.Instance, error) {
+
+	if len(node.MasterKey.Hostname) != 0 && node.IsCoMaster == false {
+		next, err := getInstance(node.MasterKey.Hostname, insts)
+		if err == nil {
+			return getMaster(next, insts)
+		} else {
+			return nil, err
+		}
+	}
+
+	if node.IsCoMaster == true {
+		next, err := getInstance(node.MasterKey.Hostname, insts)
+		if err == nil {
+			return next, nil
+		} else {
+			return nil, err
+		}
+	}
+
+	return node, nil
+}
+
+func determineMasterFor(insts []orc.Instance) (*orc.Instance, error) {
+
+	var masterForNode []orc.Instance
+
+	for _, node := range insts {
+		master, err := getMaster(&node, insts)
+		if err == nil {
+			masterForNode = append(masterForNode, *master)
+		} else {
+			return nil, fmt.Errorf("not able to retrieve the root of this node %s", node.Key.Hostname)
+		}
+	}
+
+	if len(masterForNode) != 0 {
+		masterHostName := masterForNode[0]
+		var check bool = true
+		for _, node := range masterForNode {
+			if node.Key.Hostname != masterHostName.Key.Hostname {
+				check = false
+			}
+		}
+		if check == true {
+			return &masterHostName, nil
+		} else {
+			return nil, fmt.Errorf("multiple masters")
+		}
+	} else {
+		return nil, fmt.Errorf("0 elements in instance array")
+	}
+
+}
+
+func (f *cFactory) setInstWritable(inst orc.Instance) error {
+
+	if inst.ReadOnly == true {
+		glog.V(2).Infof("set instance %s writable", inst.Key.Hostname)
+		return f.orcClient.SetHostWritable(inst.Key)
+	}
+	return nil
+}
+
+func (f *cFactory) putNodeInMaintenance(inst orc.Instance) error {
+
+	glog.V(2).Infof("set instance %s in maintenance", inst.Key.Hostname)
+	return f.orcClient.BeginMaintenance(inst.Key, "mysqlcontroller", "clusterReadOnly")
+
+}
+
+func (f *cFactory) getNodeOutOfMaintenance(inst orc.Instance) error {
+
+	glog.V(2).Infof("set instance %s out of maintenance", inst.Key.Hostname)
+	return f.orcClient.EndMaintenance(inst.Key, "mysqlcontroller", "clusterReadOnly")
+
+}
+
+// set a host read only just if needed
+func (f *cFactory) setInstReadOnly(inst orc.Instance) error {
+	if !inst.ReadOnly == true {
+		glog.V(2).Infof("set instance %s read only", inst.Key.Hostname)
+		return f.orcClient.SetHostReadOnly(inst.Key)
+	}
+	return nil
+}
+
+func (f *cFactory) updateNodesReadOnlyFlagInOrc(insts []orc.Instance) error {
+	master, err := determineMasterFor(insts)
+
+	for _, inst := range insts {
+		if f.cluster.Spec.ReadOnly == true || (err != nil && err.Error() == "multiple masters") {
+			f.putNodeInMaintenance(inst)
+			f.setInstReadOnly(inst)
+		} else if f.cluster.Spec.ReadOnly == false && err == nil {
+			f.getNodeOutOfMaintenance(inst)
+			if inst.Key.Hostname == master.Key.Hostname {
+				f.setInstWritable(inst)
+			} else {
+				f.setInstReadOnly(inst)
+			}
+		}
+	}
+
+	if err != nil {
+
+		return err
+	}
+
+	return nil
+}
+
 func (f *cFactory) updateStatusFromOrc(insts []orc.Instance) {
 	updatedNodes := []string{}
+
+	var isReadOnly bool = true
 	for _, node := range insts {
 		host := node.Key.Hostname
 		updatedNodes = append(updatedNodes, host)
@@ -106,11 +240,33 @@ func (f *cFactory) updateStatusFromOrc(insts []orc.Instance) {
 			f.updateNodeCondition(host, api.NodeConditionReplicating, core.ConditionFalse)
 		}
 
-		if !node.ReadOnly {
-			f.updateNodeCondition(host, api.NodeConditionMaster, core.ConditionTrue)
+		f.updateNodeCondition(host, api.NodeConditionMaster, core.ConditionFalse)
+
+		isReadOnly = isReadOnly && node.ReadOnly
+
+		if node.ReadOnly == true {
+			f.updateNodeCondition(host, api.NodeConditionReadOnly, core.ConditionTrue)
 		} else {
-			f.updateNodeCondition(host, api.NodeConditionMaster, core.ConditionFalse)
+			f.updateNodeCondition(host, api.NodeConditionReadOnly, core.ConditionFalse)
 		}
+
+	}
+
+	master, err := determineMasterFor(insts)
+	if err == nil {
+		f.updateNodeCondition(master.Key.Hostname, api.NodeConditionMaster, core.ConditionTrue)
+
+		if isReadOnly == true {
+			f.cluster.UpdateStatusCondition(api.ClusterConditionReadOnly,
+				core.ConditionTrue, "initializedTrue", "settingReadOnlyTrue")
+		} else {
+			f.cluster.UpdateStatusCondition(api.ClusterConditionReadOnly,
+				core.ConditionFalse, "initializedFalse", "settingReadOnlyFalse")
+		}
+
+	} else {
+
+		glog.Errorf("Error acquiring master name %s", err)
 	}
 
 	f.removeNodeConditionNotIn(updatedNodes)

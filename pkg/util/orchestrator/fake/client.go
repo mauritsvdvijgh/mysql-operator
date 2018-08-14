@@ -65,6 +65,38 @@ func (o *FakeOrc) AddInstance(cluster, host string, master bool, sls int64, slav
 	o.Clusters[cluster] = []Instance{inst}
 }
 
+func (o *FakeOrc) AddInstanceInTopology(cluster, host string, port int, master bool, sls int64, slaveR, upToDate bool, masterKey string, masterPort int, coMaster bool) {
+	valid := true
+	if sls < 0 {
+		valid = false
+	}
+	inst := Instance{
+		Key: InstanceKey{
+			Hostname: host,
+			Port:     port,
+		},
+		MasterKey: InstanceKey{
+			Hostname: masterKey,
+			Port:     masterPort,
+		},
+
+		SlaveLagSeconds: NullInt64{
+			Valid: valid,
+			Int64: sls,
+		},
+		IsCoMaster:        coMaster,
+		ClusterName:       cluster,
+		Slave_SQL_Running: slaveR,
+		Slave_IO_Running:  slaveR,
+		IsUpToDate:        upToDate,
+		IsLastCheckValid:  upToDate,
+	}
+	if o.Clusters == nil {
+		o.Clusters = make(map[string][]Instance)
+	}
+	o.Clusters[cluster] = append(o.Clusters[cluster], inst)
+}
+
 func (o *FakeOrc) RemoveInstance(cluster, host string) {
 	instances, ok := o.Clusters[cluster]
 	if !ok {
@@ -165,5 +197,49 @@ func (o *FakeOrc) AuditRecovery(cluster string) ([]TopologyRecovery, error) {
 
 func (o *FakeOrc) AckRecovery(id int64, comment string) error {
 	o.AckRec = append(o.AckRec, id)
+	return nil
+}
+
+func (o *FakeOrc) SetHostWritable(key InstanceKey) error {
+
+	var check bool = false
+	for k, instances := range o.Clusters {
+		for i, instance := range instances {
+			if instance.Key.Hostname == key.Hostname && instance.Key.Port == key.Port {
+				o.Clusters[k][i].ReadOnly = false
+				check = true
+			}
+		}
+	}
+	if check == true {
+		return nil
+	} else {
+		return fmt.Errorf("the desired host and port was not found")
+	}
+}
+
+func (o *FakeOrc) SetHostReadOnly(key InstanceKey) error {
+
+	var check bool = false
+	for k, instances := range o.Clusters {
+		for i, instance := range instances {
+			if instance.Key.Hostname == key.Hostname && instance.Key.Port == key.Port {
+				o.Clusters[k][i].ReadOnly = true
+				check = true
+			}
+		}
+	}
+	if check == true {
+		return nil
+	} else {
+		return fmt.Errorf("the desired host and port was not found")
+	}
+}
+
+func (o *FakeOrc) BeginMaintenance(key InstanceKey, owner, reason string) error {
+	return nil
+}
+
+func (o *FakeOrc) EndMaintenance(key InstanceKey, owner, reason string) error {
 	return nil
 }

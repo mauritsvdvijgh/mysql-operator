@@ -115,6 +115,8 @@ spec:
                   type: integer
               required:
               - maxQueryTime
+            readOnly:
+              type: boolean
             replicas:
               description: The number of pods. This updates replicas filed Defaults
                 to 0

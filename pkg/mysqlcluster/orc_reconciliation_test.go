@@ -18,21 +18,20 @@ package mysqlcluster
 
 import (
 	"context"
-	"testing"
-	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	core "k8s.io/api/core/v1"
-	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
-
 	api "github.com/presslabs/mysql-operator/pkg/apis/mysql/v1alpha1"
 	fakeMyClient "github.com/presslabs/mysql-operator/pkg/generated/clientset/versioned/fake"
 	"github.com/presslabs/mysql-operator/pkg/util/options"
 	fakeOrc "github.com/presslabs/mysql-operator/pkg/util/orchestrator/fake"
 	tutil "github.com/presslabs/mysql-operator/pkg/util/test"
+	core "k8s.io/api/core/v1"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
+	"testing"
+	"time"
 )
 
 func TestReconciliation(t *testing.T) {
@@ -99,6 +98,8 @@ var _ = Describe("Mysql cluster reconcilation", func() {
 				Ω(rec.Events).Should(Receive(&event))
 				Expect(event).To(ContainSubstring("ReplicationStopped"))
 				Ω(rec.Events).Should(Receive(&event))
+				Expect(event).To(ContainSubstring("DemoteMaster"))
+				Ω(rec.Events).Should(Receive(&event))
 				Expect(event).To(ContainSubstring("PromoteMaster"))
 			})
 
@@ -148,13 +149,13 @@ var _ = Describe("Mysql cluster reconcilation", func() {
 				Expect(event).To(ContainSubstring("RecoveryAcked"))
 			})
 
-			It("node not uptodate in orc", func() {
+			It("master is in orc", func() {
 				orcClient.AddInstance("asd.default", cluster.GetPodHostname(0),
 					true, -1, false, false)
 				Ω(factory.SyncOrchestratorStatus(ctx)).Should(Succeed())
 
 				Expect(cluster.Status.Nodes[0].GetCondition(api.NodeConditionMaster).Status).To(
-					Equal(core.ConditionUnknown))
+					Equal(core.ConditionTrue))
 			})
 
 			It("node not in orc", func() {
@@ -170,6 +171,103 @@ var _ = Describe("Mysql cluster reconcilation", func() {
 
 				Expect(cluster.Status.Nodes[0].GetCondition(api.NodeConditionMaster).Status).To(
 					Equal(core.ConditionUnknown))
+
+			})
+
+			It("existence of a single master", func() {
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-0",
+					3306, false, -1, false, true, "", 0, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-1",
+					3307, false, -1, false, true, "foo122-mysql-0", 3306, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-2",
+					3308, false, -1, false, true, "foo122-mysql-0", 3306, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-3",
+					3309, false, -1, false, true, "foo122-mysql-2", 3308, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-4",
+					3310, false, -1, false, true, "foo122-mysql-3", 3309, false)
+
+				insts, _ := orcClient.Cluster("asd.default")
+
+				_, err := determineMasterFor(insts)
+				Expect(err).To(BeNil())
+
+			})
+
+			It("existence of multiple masters", func() {
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-0",
+					3306, false, -1, false, true, "foo122-mysql-5", 0, true)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-1",
+					3307, false, -1, false, true, "foo122-mysql-0", 3306, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-2",
+					3308, false, -1, false, true, "foo122-mysql-0", 3306, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-3",
+					3309, false, -1, false, true, "foo122-mysql-2", 3308, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-4",
+					3310, false, -1, false, true, "foo122-mysql-3", 3309, false)
+
+				orcClient.AddInstanceInTopology("asd.default", "foo122-mysql-5",
+					3311, false, -1, false, true, "foo122-mysql-0", 3309, true)
+
+				insts, _ := orcClient.Cluster("asd.default")
+
+				_, err := determineMasterFor(insts)
+				Expect(err).ToNot(BeNil())
+
+			})
+
+			It("no instances", func() {
+
+				insts, _ := orcClient.Cluster("asd.default")
+
+				_, err := determineMasterFor(insts)
+				Expect(err).ToNot(BeNil())
+
+			})
+
+			It("set master readOnly/Writable", func() {
+
+				//Set ReadOnly to true in order to get master ReadOnly
+
+				orcClient.AddInstance("asd.default", cluster.GetPodHostname(0),
+					true, -1, false, true)
+
+				factory.cluster.Spec.ReadOnly = true
+
+				insts, _ := orcClient.Cluster("asd.default")
+
+				err := factory.updateNodesReadOnlyFlagInOrc(insts)
+				Expect(err).To(BeNil())
+
+				for _, instance := range insts {
+					if instance.Key.Hostname == cluster.GetPodHostname(0) && instance.Key.Port == 3306 {
+						Expect(instance.ReadOnly).To(Equal(true))
+					}
+				}
+
+				//Set ReadOnly to false in order to get the master Writable
+
+				factory.cluster.Spec.ReadOnly = false
+
+				insts, _ = orcClient.Cluster("asd.default")
+
+				err = factory.updateNodesReadOnlyFlagInOrc(insts)
+				Expect(err).To(BeNil())
+
+				for _, instance := range insts {
+					if instance.Key.Hostname == cluster.GetPodHostname(0) && instance.Key.Port == 3306 {
+						Expect(instance.ReadOnly).To(Equal(false))
+					}
+				}
 
 			})
 
