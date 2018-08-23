@@ -42,10 +42,21 @@ kubectl apply -f https://raw.githubusercontent.com/presslabs/mysql-operator/mast
 kubectl apply -f https://raw.githubusercontent.com/presslabs/mysql-operator/master/examples/example-cluster.yaml
 ```
 
-Before creating a cluster, you need a secret that contains the `ROOT_PASSWORD` key to
-init mysql with (an example for this secret can be found
-at [examples/example-cluster-secret.yaml](examples/example-cluster-secret.yaml)). Now, to create a cluster you need
-just a simple yaml file that defines it (an example can be found at [examples/example-cluster.yaml](examples/example-cluster.yaml):
+Before creating a cluster, you need a secret that contains the `ROOT_PASSWORD` key. An example for this secret can be found
+at [examples/example-cluster-secret.yaml](examples/example-cluster-secret.yaml)). 
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-secret
+type: Opaque
+data:
+  # root password is required to be specified
+  ROOT_PASSWORD: bm90LXNvLXNlY3VyZQ==
+```
+
+Now, to create a cluster you need just a simple yaml file that defines it. An example can be found at [examples/example-cluster.yaml](examples/example-cluster.yaml):
 
 ```yaml
 apiVersion: mysql.presslabs.org/v1alpha1
@@ -55,9 +66,6 @@ metadata:
 spec:
   replicas: 3
   secretName: my-cluster-secret
-  # backupSchedule: @hourly
-  # backupUri: s3://bucket_name/
-  # backupSecretName:
 ```
 
 For a more in depth configuration, check [examples](examples/).
